@@ -209,6 +209,66 @@ def main(argc, argv):
                     'mvcc-disk-cache': 7000,
                 },
             }
+        },
+        '/dev/ram0': {
+            120: {
+                'tpcc-wh4': {
+                    '2pl-no-wait': 1600,
+                    'occ-serial': 2750,
+                    'sto-memory': 900,
+                    'sto-counter-lazy': 900,
+                    'sto-sketch': 900,
+                    'sto-disk': 3000,
+                    'sto-disk-cache': 3000,
+                    'tictoc-memory': 900,
+                    'tictoc-counter-lazy': 900,
+                    'tictoc-sketch': 900,
+                    'tictoc-disk': 1800,
+                    'tictoc-disk-cache': 1800,
+                },
+                'tpcc-wh8': {
+                    '2pl-no-wait': 1500,
+                    'occ-serial': 3400,
+                    'sto-memory': 600,
+                    'sto-counter-lazy': 600,
+                    'sto-sketch': 600,
+                    'sto-disk': 2300,
+                    'sto-disk-cache': 1800,
+                    'tictoc-memory': 600,
+                    'tictoc-counter-lazy': 600,
+                    'tictoc-sketch': 600,
+                    'tictoc-disk': 1300,
+                    'tictoc-disk-cache': 1450,
+                },
+                'tpcc-wh16': {
+                    '2pl-no-wait': 1500,
+                    'occ-serial': 3300,
+                    'sto-memory': 150,
+                    'sto-counter-lazy': 150,
+                    'sto-sketch': 150,
+                    'sto-disk': 1500,
+                    'sto-disk-cache': 1300,
+                    'tictoc-memory': 450,
+                    'tictoc-counter-lazy': 450,
+                    'tictoc-sketch': 450,
+                    'tictoc-disk': 600,
+                    'tictoc-disk-cache': 700,
+                },
+                'tpcc-wh32': {
+                    '2pl-no-wait': 1200,
+                    'occ-serial': 3000,
+                    'sto-memory': 0,
+                    'sto-counter-lazy': 0,
+                    'sto-sketch': 0,
+                    'sto-disk': 100,
+                    'sto-disk-cache': 50,
+                    'tictoc-memory': 400,
+                    'tictoc-counter-lazy': 400,
+                    'tictoc-sketch': 400,
+                    'tictoc-disk': 0,
+                    'tictoc-disk-cache': 50,
+                }
+            }
         }
     }
     try:

@@ -208,7 +208,7 @@ def main(argc, argv):
                     'mvcc-counter-lazy': 9000,
                     'mvcc-sketch': 9000,
                     'mvcc-disk': 2000000,
-                    'mvcc-disk-cache': 2000000,
+                    'mvcc-disk-cache': 12000,
                 },
                 'write': {
                     'default': 3000,
@@ -292,28 +292,43 @@ def main(argc, argv):
             120: {
                 'read': {
                     'default': 1000,
-                    'sto-disk': 4000,
-                    'sto-disk-cache': 4000,
-                    'tictoc-disk': 5000,
-                    'tictoc-disk-cache': 5000,
-                    'mvcc-disk': 320000
+                    '2pl-no-wait': 1300,
+                    'occ-serial': 3800,
+                    'sto-memory': 800,
+                    'sto-counter-lazy': 800,
+                    'sto-sketch': 800,
+                    'sto-disk': 2500,
+                    'sto-disk-cache': 2400,
+                    'tictoc-disk': 6000,
+                    'tictoc-disk-cache': 4500,
                 },
                 'write': {
                     'default': 1000,
+                    '2pl-no-wait': 1200,
+                    'occ-serial': 2200,
                     'sto-disk': 2000,
                     'sto-disk-cache': 2000,
-                    'tictoc-disk': 2000,
-                    'tictoc-disk-cache': 2000,
-                    'mvcc-disk': 320000
+                    'tictoc-memory':2000,
+                    'tictoc-counter-lazy':2000,
+                    'tictoc-sketch':2000,
+                    'tictoc-disk': 7500,
+                    'tictoc-disk-cache': 7500,
                 },
                 'mixed': {
-                    'default': 2000,
+                    'default': 1000,
+                    '2pl-no-wait': 700,
+                    'occ-serial': 3500,
+                    'sto-memory': 1000,
+                    'sto-counter-lazy': 1000,
+                    'sto-sketch': 1000,
                     'sto-disk': 2000,
                     'sto-disk-cache': 2000,
-                    'tictoc-disk': 2000,
-                    'tictoc-disk-cache': 2000,
-                    'mvcc-disk': 200000
-                }
+                    'tictoc-memory': 1500,
+                    'tictoc-counter-lazy': 1500,
+                    'tictoc-sketch': 1500,
+                    'tictoc-disk': 4000,
+                    'tictoc-disk-cache': 3900,
+                },
             }
         }
     }

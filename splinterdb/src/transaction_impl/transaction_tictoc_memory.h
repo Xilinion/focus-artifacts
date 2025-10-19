@@ -263,7 +263,7 @@ transactional_splinterdb_config_init(
           sizeof(txn_splinterdb_cfg->kvsb_cfg));
 
    iceberg_config_default_init(&txn_splinterdb_cfg->iceberght_config);
-   txn_splinterdb_cfg->iceberght_config.log_slots = 26;
+   txn_splinterdb_cfg->iceberght_config.log_slots = 28;
 
    // TODO things like filename, logfile, or data_cfg would need a
    // deep-copy
