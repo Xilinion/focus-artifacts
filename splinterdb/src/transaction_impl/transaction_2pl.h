@@ -841,10 +841,13 @@ local_write(transactional_splinterdb *txn_kvsb,
             message                   msg)
 {
    const data_config *cfg = txn_kvsb->tcfg->kvsb_cfg.data_cfg;
+   /*
    char              *user_key_copy;
    user_key_copy = TYPED_ARRAY_ZALLOC(0, user_key_copy, slice_length(user_key));
    rw_entry *entry = rw_entry_get(
       txn_kvsb, txn, slice_copy_contents(user_key_copy, user_key), cfg, FALSE);
+      */
+   rw_entry *entry = rw_entry_get(txn_kvsb, txn, user_key, cfg, FALSE);
    /* if (message_class(msg) == MESSAGE_TYPE_UPDATE */
    /*     || message_class(msg) == MESSAGE_TYPE_DELETE) */
    /* { */
