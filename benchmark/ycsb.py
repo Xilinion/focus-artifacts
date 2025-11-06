@@ -257,7 +257,7 @@ def main(argc, argv):
                     'mvcc-memory': 16000,
                     'mvcc-counter-lazy': 16000,
                     'mvcc-sketch': 16000,
-                    'mvcc-disk': 4000000,
+                    'mvcc-disk': 7000000,
                     'mvcc-disk-cache': 26000,
                 }
             }
