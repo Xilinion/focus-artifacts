@@ -19,10 +19,10 @@
 #define TRACE_ATS_MASK   (TRACE_ATS_SIZE - 1u)
 #define TRACE_OUTPUT_DIR "trace_output"
 
-static _Atomic uint64_t  g_trace_ats[TRACE_ATS_SIZE];
-static FILE             *g_trace_abort_fp[MAX_THREADS];
-static FILE             *g_trace_write_fp[MAX_THREADS];
-static _Atomic uint64_t  g_trace_txn_seq[MAX_THREADS];
+static uint64_t  g_trace_ats[TRACE_ATS_SIZE];
+static FILE     *g_trace_abort_fp[MAX_THREADS];
+static FILE     *g_trace_write_fp[MAX_THREADS];
+static uint64_t  g_trace_txn_seq[MAX_THREADS];
 
 static inline uint64_t
 trace_fnv64(const void *data, size_t len)
