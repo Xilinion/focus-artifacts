@@ -32,7 +32,11 @@ available_systems = [
     'mvcc-counter',
     'mvcc-counter-lazy',
     'mvcc-sketch',
-    'mvcc-sketch-lazy'
+    'mvcc-sketch-lazy',
+    'tictoc-memory-trace',
+    'tictoc-disk-trace',
+    'tictoc-memory-ext',
+    'tictoc-disk-ext',
 ]
 
 system_sed_map = {
@@ -64,6 +68,10 @@ system_sed_map = {
     'mvcc-counter-lazy': ["sed -i 's/#define EXPERIMENTAL_MODE_MVCC_COUNTER_LAZY [ ]*0/#define EXPERIMENTAL_MODE_MVCC_COUNTER_LAZY 1/g' src/experimental_mode.h"],
     'mvcc-sketch': ["sed -i 's/#define EXPERIMENTAL_MODE_MVCC_SKETCH [ ]*0/#define EXPERIMENTAL_MODE_MVCC_SKETCH 1/g' src/experimental_mode.h"],
     'mvcc-sketch-lazy': ["sed -i 's/#define EXPERIMENTAL_MODE_MVCC_SKETCH_LAZY [ ]*0/#define EXPERIMENTAL_MODE_MVCC_SKETCH_LAZY 1/g' src/experimental_mode.h"],
+    'tictoc-memory-trace': ["sed -i 's/#define EXPERIMENTAL_MODE_TICTOC_MEMORY_TRACE [ ]*0/#define EXPERIMENTAL_MODE_TICTOC_MEMORY_TRACE 1/g' src/experimental_mode.h"],
+    'tictoc-disk-trace': ["sed -i 's/#define EXPERIMENTAL_MODE_TICTOC_DISK_TRACE [ ]*0/#define EXPERIMENTAL_MODE_TICTOC_DISK_TRACE 1/g' src/experimental_mode.h"],
+    'tictoc-memory-ext': ["sed -i 's/#define EXPERIMENTAL_MODE_TICTOC_MEMORY_EXT [ ]*0/#define EXPERIMENTAL_MODE_TICTOC_MEMORY_EXT 1/g' src/experimental_mode.h"],
+    'tictoc-disk-ext':   ["sed -i 's/#define EXPERIMENTAL_MODE_TICTOC_DISK_EXT [ ]*0/#define EXPERIMENTAL_MODE_TICTOC_DISK_EXT 1/g' src/experimental_mode.h"],
 }
 
 class ExpSystem:
@@ -86,12 +94,14 @@ class ExpSystem:
 
         os.environ['CC'] = 'clang'
         os.environ['LD'] = 'clang'
+        os.makedirs('/home/xt253/.tmp', exist_ok=True)
+        os.environ['TMPDIR'] = '/home/xt253/.tmp'
         current_dir = os.getcwd()
         if backup:
             run_cmd(f'tar czf splinterdb-backup-{time.time()}.tar.gz {splinterdb_dir}')
         os.chdir(splinterdb_dir)
         run_cmd('git checkout -- src/experimental_mode.h')
-        run_cmd('sudo -E make clean')
+        run_cmd('make clean')
         run_cmd('date')
         run_cmd('hostname -A')
         run_cmd('git rev-parse --verify HEAD')
@@ -99,8 +109,7 @@ class ExpSystem:
             for sed in system_sed_map[sys]:
                 run_cmd(sed)
         change_max_threads()
-        run_cmd('sudo -E make -j16 install')
-        run_cmd('sudo ldconfig')
+        run_cmd('TMPDIR=/home/xt253/.tmp make -j4 INSTALL_PATH=/home/xt253/.local install')
         os.chdir(current_dir)
         run_cmd('make clean')
         run_cmd('make')
@@ -124,12 +133,14 @@ class ExpSystem:
 
         os.environ['CC'] = 'clang'
         os.environ['LD'] = 'clang'
+        os.makedirs('/home/xt253/.tmp', exist_ok=True)
+        os.environ['TMPDIR'] = '/home/xt253/.tmp'
         current_dir = os.getcwd()
         if backup:
             run_cmd(f'tar czf splinterdb-backup-{time.time()}.tar.gz {splinterdb_dir}')
         os.chdir(splinterdb_dir)
         run_cmd('git checkout -- src/experimental_mode.h')
-        run_cmd('sudo -E make clean')
+        run_cmd('make clean')
         run_cmd('date')
         run_cmd('hostname -A')
         run_cmd('git rev-parse --verify HEAD')
@@ -137,7 +148,7 @@ class ExpSystem:
             for sed in system_sed_map[sys]:
                 run_cmd(sed)
         change_max_threads()
-        
+
         filename = 'src/transaction_impl/transaction_kr_occ.h'
         run_cmd(f'git checkout -- {filename}')
         with open(splinterdb_dir + "/" + filename, 'r') as f:
@@ -163,8 +174,7 @@ class ExpSystem:
             with open(splinterdb_dir + "/" + filename, 'w') as f:
                 f.writelines(write_lines)
 
-        run_cmd('sudo -E make -j16 install')
-        run_cmd('sudo ldconfig')
+        run_cmd('make -j4 INSTALL_PATH=/home/xt253/.local install')
         os.chdir(current_dir)
         run_cmd('make clean')
         run_cmd('make')
