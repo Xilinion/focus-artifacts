@@ -11,7 +11,6 @@
 
 #include <stdio.h>
 #include <stdint.h>
-#include <sys/stat.h>
 
 // --- Trace infrastructure ---------------------------------------------------
 
@@ -390,8 +389,7 @@ transactional_splinterdb_create_or_open(const splinterdb_config   *kvsb_cfg,
    _txn_kvsb->lock_tbl = lock_table_create(kvsb_cfg->data_cfg);
    *txn_kvsb           = _txn_kvsb;
 
-   // Ensure trace output directory exists (best-effort, single level)
-   mkdir(TRACE_OUTPUT_DIR, 0755);
+   // trace_output/ is created by the Python benchmark harness before invocation
 
    return 0;
 }
