@@ -13,6 +13,7 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <sys/stat.h>
 
 // --- Trace infrastructure ---------------------------------------------------
 
@@ -306,8 +307,8 @@ transactional_splinterdb_create_or_open(const splinterdb_config   *kvsb_cfg,
 
    *txn_kvsb = _txn_kvsb;
 
-   // Ensure trace output directory exists (best-effort)
-   (void)system("mkdir -p " TRACE_OUTPUT_DIR);
+   // Ensure trace output directory exists (best-effort, single level)
+   mkdir(TRACE_OUTPUT_DIR, 0755);
 
    return 0;
 }
