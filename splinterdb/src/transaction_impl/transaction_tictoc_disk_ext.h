@@ -749,6 +749,10 @@ transactional_splinterdb_lookup(transactional_splinterdb *txn_kvsb,
          merge_accumulator_length(&_result->value) - sizeof(tuple_header);
       memmove(merge_accumulator_data(&_result->value), tuple->value, value_len);
       merge_accumulator_resize(&_result->value, value_len);
+   } else {
+      entry->wts = entry->rts = 0;
+      // --txn->num_rw_entries;
+      // rw_entry_deinit(entry);
    }
 
    return rc;
