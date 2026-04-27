@@ -9,8 +9,9 @@
 #include "lock_table.h"
 #include "poison.h"
 
-#include <stdio.h>
 #include <stdint.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 // --- Trace infrastructure ---------------------------------------------------
 
@@ -20,8 +21,8 @@
 #define TRACE_OUTPUT_DIR "trace_output"
 
 static uint64_t  g_trace_ats[TRACE_ATS_SIZE];
-static FILE     *g_trace_abort_fp[MAX_THREADS];
-static FILE     *g_trace_write_fp[MAX_THREADS];
+static int       g_trace_abort_fd[MAX_THREADS];
+static int       g_trace_write_fd[MAX_THREADS];
 static uint64_t  g_trace_txn_seq[MAX_THREADS];
 
 static inline uint64_t
@@ -433,10 +434,10 @@ transactional_splinterdb_register_thread(transactional_splinterdb *kvs)
    if (tid < MAX_THREADS) {
       char path[512];
       snprintf(path, sizeof(path), TRACE_OUTPUT_DIR "/aborts_%lu.tsv", (unsigned long)tid);
-      g_trace_abort_fp[tid] = fopen(path, "a");
+      g_trace_abort_fd[tid] = open(path, O_WRONLY|O_CREAT|O_APPEND, 0644);
 
       snprintf(path, sizeof(path), TRACE_OUTPUT_DIR "/writes_%lu.tsv", (unsigned long)tid);
-      g_trace_write_fp[tid] = fopen(path, "a");
+      g_trace_write_fd[tid] = open(path, O_WRONLY|O_CREAT|O_APPEND, 0644);
    }
 }
 
@@ -445,15 +446,13 @@ transactional_splinterdb_deregister_thread(transactional_splinterdb *kvs)
 {
    threadid tid = platform_get_tid();
    if (tid < MAX_THREADS) {
-      if (g_trace_abort_fp[tid]) {
-         fflush(g_trace_abort_fp[tid]);
-         fclose(g_trace_abort_fp[tid]);
-         g_trace_abort_fp[tid] = NULL;
+      if (g_trace_abort_fd[tid] > 0) {
+         close(g_trace_abort_fd[tid]);
+         g_trace_abort_fd[tid] = 0;
       }
-      if (g_trace_write_fp[tid]) {
-         fflush(g_trace_write_fp[tid]);
-         fclose(g_trace_write_fp[tid]);
-         g_trace_write_fp[tid] = NULL;
+      if (g_trace_write_fd[tid] > 0) {
+         close(g_trace_write_fd[tid]);
+         g_trace_write_fd[tid] = 0;
       }
    }
 
@@ -576,7 +575,7 @@ RETRY_LOCK_WRITE_SET:
 
       threadid tid     = platform_get_tid();
       uint64   my_seq  = 0;
-      bool did_write = (num_writes > 0) && (tid < MAX_THREADS) && g_trace_write_fp[tid];
+      bool did_write = (num_writes > 0) && (tid < MAX_THREADS) && (g_trace_write_fd[tid] > 0);
       if (did_write) {
          my_seq = __atomic_fetch_add(&g_trace_txn_seq[tid], 1, __ATOMIC_RELAXED);
       }
@@ -593,14 +592,16 @@ RETRY_LOCK_WRITE_SET:
          memcpy(&msg->ts, &ts, sizeof(ts));
 
          // Write log entry before the actual DB write
-         if (did_write && g_trace_write_fp[tid]) {
+         if (did_write) {
             uint64 key_hash = trace_fnv64(slice_data(w->key), slice_length(w->key));
             uint64 ats_val  = trace_ats_inc(key_hash);
-            fprintf(g_trace_write_fp[tid], "%llu\t%llu\t%llu\t%llu\n",
-                    (unsigned long long)my_seq,
-                    (unsigned long long)key_hash,
-                    (unsigned long long)commit_ts,
-                    (unsigned long long)ats_val);
+            char   wbuf[128];
+            int    wlen = snprintf(wbuf, sizeof(wbuf), "%llu\t%llu\t%llu\t%llu\n",
+                                   (unsigned long long)my_seq,
+                                   (unsigned long long)key_hash,
+                                   (unsigned long long)commit_ts,
+                                   (unsigned long long)ats_val);
+            write(g_trace_write_fd[tid], wbuf, wlen);
          }
 
          switch (message_class(w->msg)) {
@@ -629,7 +630,7 @@ RETRY_LOCK_WRITE_SET:
 
       // --- Pass 2: log all conflicting reads (after write locks released) --
       threadid tid = platform_get_tid();
-      if (tid < MAX_THREADS && g_trace_abort_fp[tid]) {
+      if (tid < MAX_THREADS && g_trace_abort_fd[tid] > 0) {
          uint64 my_seq = __atomic_fetch_add(&g_trace_txn_seq[tid], 1, __ATOMIC_RELAXED);
          for (uint64 i = 0; i < num_reads; ++i) {
             rw_entry     *r   = read_set[i];
@@ -641,14 +642,17 @@ RETRY_LOCK_WRITE_SET:
                uint64 cur_wts   = (uint64)wts;
                uint64 loc_wts   = (uint64)r->wts;
                int    is_hard   = (cur_wts <= (uint64)commit_ts) ? 1 : 0;
-               fprintf(g_trace_abort_fp[tid], "%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%d\n",
-                       (unsigned long long)my_seq,
-                       (unsigned long long)key_hash,
-                       (unsigned long long)loc_wts,
-                       (unsigned long long)cur_wts,
-                       (unsigned long long)commit_ts,
-                       (unsigned long long)ats_val,
-                       is_hard);
+               char   abuf[256];
+               int    alen = snprintf(abuf, sizeof(abuf),
+                                      "%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%d\n",
+                                      (unsigned long long)my_seq,
+                                      (unsigned long long)key_hash,
+                                      (unsigned long long)loc_wts,
+                                      (unsigned long long)cur_wts,
+                                      (unsigned long long)commit_ts,
+                                      (unsigned long long)ats_val,
+                                      is_hard);
+               write(g_trace_abort_fd[tid], abuf, alen);
             }
          }
       }

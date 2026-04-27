@@ -1,6 +1,6 @@
 CC=g++
 CFLAGS=-std=c++17 -c -g -O3 -Wall -D SPLINTERDB_PLATFORM_DIR=platform_linux
-INCLUDES=-I ../
+INCLUDES=-I ../ -I /home/xt253/.local/include
 CPPSOURCES=$(wildcard *.cc)
 CSOURCES=$(wildcard *.c)
 OBJECTS=$(CPPSOURCES:.cc=.o) $(CSOURCES:.c=.o)

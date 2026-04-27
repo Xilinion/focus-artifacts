@@ -1,0 +1,46 @@
+==============================================================
+  TicToc-Ext Improvement Comparison Report
+==============================================================
+
+[ Trace Baseline Analysis ]
+  Source            : trace_output/summary_memory.txt
+  Workload          : xlarge (50M records), 16t, 60s
+  Total abort txns  :    102,024
+  Hard aborts       :     80,178  (78.6%)
+  Soft-unnecessary  :     15,258  (15.0%)
+  Avoidable (entry) : 34.2%
+
+[ memory-ext Results ]
+  Mode              : EXPERIMENTAL_MODE_TICTOC_MEMORY_EXT
+  Workload          : xlarge (50M records), 16t, 120s
+  Commits           :  8,595,003
+  Aborts            :    231,903
+  Abort rate        : 2.627%
+  Long txn abort rt : 11.776%
+
+  -- Estimated improvement vs baseline --
+  Estimated baseline abort rate : 3.077%  (assuming 15.0% of aborts were avoidable)
+  Observed ext abort rate       : 2.627%
+  Absolute reduction            : 0.449 pp
+  Relative reduction            : 14.6%
+
+[ disk-ext Results ]
+  Mode              : EXPERIMENTAL_MODE_TICTOC_DISK_EXT
+  Workload          : large (10M records), 16t, 120s
+  Commits           : 11,850,546
+  Aborts            :    316,311
+  Abort rate        : 2.600%
+  Long txn abort rt : 11.575%
+
+  Note: No disk-variant trace was collected; baseline estimation
+        unavailable for disk-ext. Trace avoidable fraction (15%)
+        was measured on the memory variant only.
+
+[ Summary ]
+  Trace predicted 15.0% of memory-variant aborts are avoidable
+  with a per-key write-history buffer.
+  memory-ext achieved ~15% relative abort-rate reduction
+  (3.077% → 2.627%), consistent with prediction.
+  disk-ext abort rate: 2.600% (10M-record workload).
+
+==============================================================

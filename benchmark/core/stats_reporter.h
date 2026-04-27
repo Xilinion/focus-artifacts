@@ -6,6 +6,7 @@
 #include <numeric>
 #include <vector>
 #include <fstream>
+#include <unordered_map>
 #include <unistd.h>
 #include "benchmark_structs.h"
 
