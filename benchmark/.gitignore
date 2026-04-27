@@ -37,6 +37,9 @@
 *.data
 *.output
 
+__pycache__/
+*.py[cod]
+
 trace_output/
 ext_output/
 results/
