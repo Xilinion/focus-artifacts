@@ -100,7 +100,7 @@ class ExpSystem:
         if backup:
             run_cmd(f'tar czf splinterdb-backup-{time.time()}.tar.gz {splinterdb_dir}')
         os.chdir(splinterdb_dir)
-        run_cmd('git checkout -- src/experimental_mode.h')
+        run_cmd('cp src/experimental_mode.h.default src/experimental_mode.h 2>/dev/null || git checkout -- src/experimental_mode.h 2>/dev/null || true')
         run_cmd('make clean')
         run_cmd('date')
         run_cmd('hostname -A')
@@ -139,7 +139,7 @@ class ExpSystem:
         if backup:
             run_cmd(f'tar czf splinterdb-backup-{time.time()}.tar.gz {splinterdb_dir}')
         os.chdir(splinterdb_dir)
-        run_cmd('git checkout -- src/experimental_mode.h')
+        run_cmd('cp src/experimental_mode.h.default src/experimental_mode.h 2>/dev/null || git checkout -- src/experimental_mode.h 2>/dev/null || true')
         run_cmd('make clean')
         run_cmd('date')
         run_cmd('hostname -A')

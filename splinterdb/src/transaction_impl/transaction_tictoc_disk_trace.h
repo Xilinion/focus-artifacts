@@ -7,23 +7,24 @@
 #include "splinterdb_internal.h"
 #include "FPSketch/iceberg_table.h"
 #include "lock_table.h"
-#include "poison.h"
 
+// Trace files do file I/O (fopen/fwrite/fclose/malloc/free) — no poison.h
 #include <stdint.h>
-#include <fcntl.h>
-#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/stat.h>
 
 // --- Trace infrastructure ---------------------------------------------------
+// Records are buffered per-thread in heap-allocated structs during the run.
+// All file I/O happens only at deregister_thread (flush + close).
+// TICTOC_EXPID env var selects output subdirectory: trace_output/$EXPID/
 
+#define TRACE_BUF_SIZE   2000000
 #define TRACE_ATS_BITS   20
 #define TRACE_ATS_SIZE   (1u << TRACE_ATS_BITS)
 #define TRACE_ATS_MASK   (TRACE_ATS_SIZE - 1u)
-#define TRACE_OUTPUT_DIR "trace_output"
 
-static uint64_t  g_trace_ats[TRACE_ATS_SIZE];
-static int       g_trace_abort_fd[MAX_THREADS];
-static int       g_trace_write_fd[MAX_THREADS];
-static uint64_t  g_trace_txn_seq[MAX_THREADS];
+static uint64_t g_trace_ats[TRACE_ATS_SIZE];
 
 static inline uint64_t
 trace_fnv64(const void *data, size_t len)
@@ -50,6 +51,35 @@ trace_ats_read(uint64_t key_hash)
    uint64_t idx = key_hash & TRACE_ATS_MASK;
    return __atomic_load_n(&g_trace_ats[idx], __ATOMIC_RELAXED);
 }
+
+typedef struct {
+   uint64_t txn_seq;
+   uint64_t key_hash;
+   uint64_t new_wts;      // commit_ts written to the tuple
+   uint64_t ats_at_write;
+} write_record;
+
+typedef struct {
+   uint64_t txn_seq;
+   uint64_t key_hash;
+   uint64_t local_wts;
+   uint64_t current_wts;
+   uint64_t commit_ts;
+   uint64_t ats_at_abort;
+   int      is_hard;
+} abort_record;
+
+typedef struct {
+   write_record *write_buf;
+   abort_record *abort_buf;
+   uint64_t      write_count;
+   uint64_t      abort_count;
+   uint64_t      txn_seq;
+   FILE         *write_fp;
+   FILE         *abort_fp;
+} thread_trace_state;
+
+static thread_trace_state g_trace_state[MAX_THREADS];
 
 // ---------------------------------------------------------------------------
 
@@ -390,8 +420,6 @@ transactional_splinterdb_create_or_open(const splinterdb_config   *kvsb_cfg,
    _txn_kvsb->lock_tbl = lock_table_create(kvsb_cfg->data_cfg);
    *txn_kvsb           = _txn_kvsb;
 
-   // trace_output/ is created by the Python benchmark harness before invocation
-
    return 0;
 }
 
@@ -432,12 +460,30 @@ transactional_splinterdb_register_thread(transactional_splinterdb *kvs)
 
    threadid tid = platform_get_tid();
    if (tid < MAX_THREADS) {
-      char path[512];
-      snprintf(path, sizeof(path), TRACE_OUTPUT_DIR "/aborts_%lu.tsv", (unsigned long)tid);
-      g_trace_abort_fd[tid] = open(path, O_WRONLY|O_CREAT|O_APPEND, 0644);
+      const char *expid = getenv("TICTOC_EXPID");
+      char        dir[512];
+      if (expid && expid[0]) {
+         snprintf(dir, sizeof(dir), "trace_output/%s", expid);
+      } else {
+         snprintf(dir, sizeof(dir), "trace_output");
+      }
+      mkdir(dir, 0755);
 
-      snprintf(path, sizeof(path), TRACE_OUTPUT_DIR "/writes_%lu.tsv", (unsigned long)tid);
-      g_trace_write_fd[tid] = open(path, O_WRONLY|O_CREAT|O_APPEND, 0644);
+      char path[640];
+      snprintf(path, sizeof(path), "%s/writes_%lu.tsv", dir, (unsigned long)tid);
+      g_trace_state[tid].write_fp = fopen(path, "a");
+
+      snprintf(
+         path, sizeof(path), "%s/aborts_%lu.tsv", dir, (unsigned long)tid);
+      g_trace_state[tid].abort_fp = fopen(path, "a");
+
+      g_trace_state[tid].write_buf =
+         TYPED_ARRAY_ZALLOC(0, g_trace_state[tid].write_buf, TRACE_BUF_SIZE);
+      g_trace_state[tid].abort_buf =
+         TYPED_ARRAY_ZALLOC(0, g_trace_state[tid].abort_buf, TRACE_BUF_SIZE);
+      g_trace_state[tid].write_count = 0;
+      g_trace_state[tid].abort_count = 0;
+      g_trace_state[tid].txn_seq     = 0;
    }
 }
 
@@ -446,14 +492,49 @@ transactional_splinterdb_deregister_thread(transactional_splinterdb *kvs)
 {
    threadid tid = platform_get_tid();
    if (tid < MAX_THREADS) {
-      if (g_trace_abort_fd[tid] > 0) {
-         close(g_trace_abort_fd[tid]);
-         g_trace_abort_fd[tid] = 0;
+      thread_trace_state *ts = &g_trace_state[tid];
+
+      if (ts->write_fp && ts->write_buf) {
+         for (uint64_t i = 0; i < ts->write_count; i++) {
+            write_record *r = &ts->write_buf[i];
+            fprintf(ts->write_fp,
+                    "%llu\t%llu\t%llu\t%llu\n",
+                    (unsigned long long)r->txn_seq,
+                    (unsigned long long)r->key_hash,
+                    (unsigned long long)r->new_wts,
+                    (unsigned long long)r->ats_at_write);
+         }
+         fclose(ts->write_fp);
+         ts->write_fp = NULL;
       }
-      if (g_trace_write_fd[tid] > 0) {
-         close(g_trace_write_fd[tid]);
-         g_trace_write_fd[tid] = 0;
+
+      if (ts->abort_fp && ts->abort_buf) {
+         for (uint64_t i = 0; i < ts->abort_count; i++) {
+            abort_record *r = &ts->abort_buf[i];
+            fprintf(ts->abort_fp,
+                    "%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%d\n",
+                    (unsigned long long)r->txn_seq,
+                    (unsigned long long)r->key_hash,
+                    (unsigned long long)r->local_wts,
+                    (unsigned long long)r->current_wts,
+                    (unsigned long long)r->commit_ts,
+                    (unsigned long long)r->ats_at_abort,
+                    r->is_hard);
+         }
+         fclose(ts->abort_fp);
+         ts->abort_fp = NULL;
       }
+
+      if (ts->write_buf) {
+         platform_free(0, ts->write_buf);
+         ts->write_buf = NULL;
+      }
+      if (ts->abort_buf) {
+         platform_free(0, ts->abort_buf);
+         ts->abort_buf = NULL;
+      }
+      ts->write_count = 0;
+      ts->abort_count = 0;
    }
 
    splinterdb_deregister_thread(kvs->kvsb);
@@ -531,7 +612,7 @@ RETRY_LOCK_WRITE_SET:
       commit_ts = MAX(commit_ts, rts + 1);
    }
 
-   // --- Pass 1: abort detection (original logic) ---------------------------
+   // Pass 1: determine is_abort with early exit on conflict
    bool is_abort = FALSE;
    for (uint64 i = 0; i < num_reads; ++i) {
       rw_entry *r = read_set[i];
@@ -575,9 +656,11 @@ RETRY_LOCK_WRITE_SET:
 
       threadid tid     = platform_get_tid();
       uint64   my_seq  = 0;
-      bool did_write = (num_writes > 0) && (tid < MAX_THREADS) && (g_trace_write_fd[tid] > 0);
-      if (did_write) {
-         my_seq = __atomic_fetch_add(&g_trace_txn_seq[tid], 1, __ATOMIC_RELAXED);
+      bool     has_bufs = (tid < MAX_THREADS)
+                       && (g_trace_state[tid].write_buf != NULL)
+                       && (num_writes > 0);
+      if (has_bufs) {
+         my_seq = g_trace_state[tid].txn_seq++;
       }
 
       for (uint64 i = 0; i < num_writes; ++i) {
@@ -591,17 +674,16 @@ RETRY_LOCK_WRITE_SET:
          tuple_header *msg = (tuple_header *)message_data(w->msg);
          memcpy(&msg->ts, &ts, sizeof(ts));
 
-         // Write log entry before the actual DB write
-         if (did_write) {
-            uint64 key_hash = trace_fnv64(slice_data(w->key), slice_length(w->key));
-            uint64 ats_val  = trace_ats_inc(key_hash);
-            char   wbuf[128];
-            int    wlen = snprintf(wbuf, sizeof(wbuf), "%llu\t%llu\t%llu\t%llu\n",
-                                   (unsigned long long)my_seq,
-                                   (unsigned long long)key_hash,
-                                   (unsigned long long)commit_ts,
-                                   (unsigned long long)ats_val);
-            write(g_trace_write_fd[tid], wbuf, wlen);
+         if (has_bufs && g_trace_state[tid].write_count < TRACE_BUF_SIZE) {
+            uint64        key_hash =
+               trace_fnv64(slice_data(w->key), slice_length(w->key));
+            uint64        ats_val = trace_ats_inc(key_hash);
+            write_record *wr =
+               &g_trace_state[tid].write_buf[g_trace_state[tid].write_count++];
+            wr->txn_seq      = my_seq;
+            wr->key_hash     = key_hash;
+            wr->new_wts      = (uint64_t)commit_ts;
+            wr->ats_at_write = ats_val;
          }
 
          switch (message_class(w->msg)) {
@@ -625,34 +707,38 @@ RETRY_LOCK_WRITE_SET:
       }
    } else {
       for (int i = 0; i < num_writes; ++i) {
-         lock_table_release_entry_lock(txn_kvsb->lock_tbl, &write_set[i]->lock);
+         lock_table_release_entry_lock(txn_kvsb->lock_tbl,
+                                       &write_set[i]->lock);
       }
 
-      // --- Pass 2: log all conflicting reads (after write locks released) --
+      // Pass 2: log all conflicting reads (no early exit)
       threadid tid = platform_get_tid();
-      if (tid < MAX_THREADS && g_trace_abort_fd[tid] > 0) {
-         uint64 my_seq = __atomic_fetch_add(&g_trace_txn_seq[tid], 1, __ATOMIC_RELAXED);
+      if (tid < MAX_THREADS && g_trace_state[tid].abort_buf != NULL) {
+         uint64 my_seq = g_trace_state[tid].txn_seq++;
          for (uint64 i = 0; i < num_reads; ++i) {
             rw_entry     *r   = read_set[i];
             txn_timestamp wts = 0;
             get_global_timestamps(txn_kvsb, r, &wts, NULL);
-            if (wts != r->wts) {
-               uint64 key_hash  = trace_fnv64(slice_data(r->key), slice_length(r->key));
-               uint64 ats_val   = trace_ats_read(key_hash);
-               uint64 cur_wts   = (uint64)wts;
-               uint64 loc_wts   = (uint64)r->wts;
-               int    is_hard   = (cur_wts <= (uint64)commit_ts) ? 1 : 0;
-               char   abuf[256];
-               int    alen = snprintf(abuf, sizeof(abuf),
-                                      "%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%d\n",
-                                      (unsigned long long)my_seq,
-                                      (unsigned long long)key_hash,
-                                      (unsigned long long)loc_wts,
-                                      (unsigned long long)cur_wts,
-                                      (unsigned long long)commit_ts,
-                                      (unsigned long long)ats_val,
-                                      is_hard);
-               write(g_trace_abort_fd[tid], abuf, alen);
+            uint64 cur_wts = (uint64)wts;
+            uint64 loc_wts = (uint64)r->wts;
+            if (cur_wts != loc_wts
+                && g_trace_state[tid].abort_count < TRACE_BUF_SIZE)
+            {
+               uint64        key_hash =
+                  trace_fnv64(slice_data(r->key), slice_length(r->key));
+               uint64        ats_val = trace_ats_read(key_hash);
+               int           is_hard =
+                  (cur_wts <= (uint64)commit_ts) ? 1 : 0;
+               abort_record *ar =
+                  &g_trace_state[tid]
+                      .abort_buf[g_trace_state[tid].abort_count++];
+               ar->txn_seq      = my_seq;
+               ar->key_hash     = key_hash;
+               ar->local_wts    = loc_wts;
+               ar->current_wts  = cur_wts;
+               ar->commit_ts    = (uint64)commit_ts;
+               ar->ats_at_abort = ats_val;
+               ar->is_hard      = is_hard;
             }
          }
       }

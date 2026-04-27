@@ -11,57 +11,51 @@
 
 #include <stdint.h>
 
-// --- History-buffer infrastructure (in-memory, same as memory_ext) ----------
-// See transaction_tictoc_memory_ext.h for full description.
+// --- History-buffer infrastructure (in-memory) ------------------------------
+// An iceberg-managed histcache stores a per-key tictoc_hist_entry.
+// On each committed write we record commit_ts (the NEW wts) under the entry's
+// mutex.  At soft-abort validation we check whether any recorded new_wts falls
+// strictly inside (local_wts, commit_ts].  If none does, the abort is
+// unnecessary and we skip it.
+//
+// The tictoc_hist_entry pointer is stored in the low 64 bits of the 128-bit
+// iceberg ValueType.  The inserting thread allocates and stores atomically;
+// concurrent threads spin-wait (< ~100 ns) until the pointer is non-null.
+// iceberg's post_remove callback frees the entry when refcount hits 0.
 
-#define EXT_HIST_BITS  18
-#define EXT_HIST_SIZE  (1u << EXT_HIST_BITS)
-#define EXT_HIST_MASK  (EXT_HIST_SIZE - 1u)
-#define EXT_HIST_DEPTH 4
+#define EXT_HIST_MAX_WRITES MAX_THREADS
 
 typedef struct {
-   uint64_t wts[EXT_HIST_DEPTH];
-   uint64_t head;
-} ext_hist_entry;
+   txn_timestamp  wts_list[EXT_HIST_MAX_WRITES]; // new wts values from commits
+   int            count;
+   platform_mutex lock;
+} tictoc_hist_entry;
 
-static ext_hist_entry g_ext_hist[EXT_HIST_SIZE];
-
-static inline uint64_t
-ext_fnv64(const void *data, size_t len)
-{
-   const uint8_t *p = (const uint8_t *)data;
-   uint64_t       h = 14695981039346656037ULL;
-   for (size_t i = 0; i < len; i++) {
-      h ^= p[i];
-      h *= 1099511628211ULL;
-   }
-   return h;
-}
-
+// Store/retrieve tictoc_hist_entry* in low 64 bits of iceberg ValueType.
+// ValueType = unsigned __int128; low 64 bits on little-endian x86_64.
 static inline void
-ext_record_write(slice key, uint64_t old_wts)
+hist_value_set_ptr(ValueType *val, tictoc_hist_entry *ptr)
 {
-   uint64_t hash = ext_fnv64(slice_data(key), slice_length(key));
-   uint64_t slot = hash & EXT_HIST_MASK;
-   uint64_t idx  =
-      __atomic_fetch_add(&g_ext_hist[slot].head, 1, __ATOMIC_RELAXED)
-      % EXT_HIST_DEPTH;
-   __atomic_store_n(&g_ext_hist[slot].wts[idx], old_wts, __ATOMIC_RELEASE);
+   __atomic_store_n(
+      (uint64_t *)val, (uint64_t)(uintptr_t)ptr, __ATOMIC_RELEASE);
 }
 
-static inline bool
-ext_check_intermediate(slice key, uint64_t local_wts, uint64_t commit_ts)
+static inline tictoc_hist_entry *
+hist_value_get_ptr(const ValueType *val)
 {
-   uint64_t hash = ext_fnv64(slice_data(key), slice_length(key));
-   uint64_t slot = hash & EXT_HIST_MASK;
-   for (int j = 0; j < EXT_HIST_DEPTH; j++) {
-      uint64_t h =
-         __atomic_load_n(&g_ext_hist[slot].wts[j], __ATOMIC_ACQUIRE);
-      if (h > local_wts && h <= commit_ts) {
-         return TRUE;
-      }
+   return (tictoc_hist_entry *)(uintptr_t)__atomic_load_n(
+      (const uint64_t *)val, __ATOMIC_ACQUIRE);
+}
+
+// Called by iceberg when refcount hits 0 and the entry is evicted.
+static void
+hist_post_remove(slice key, ValueType *val, void *aux)
+{
+   tictoc_hist_entry *he = hist_value_get_ptr(val);
+   if (he) {
+      platform_mutex_destroy(&he->lock);
+      platform_free(0, he);
    }
-   return FALSE;
 }
 
 // ---------------------------------------------------------------------------
@@ -75,6 +69,7 @@ typedef struct transactional_splinterdb_config {
    splinterdb_config           kvsb_cfg;
    transaction_isolation_level isol_level;
    transactional_data_config  *txn_data_cfg;
+   iceberg_config              histcache_config;
    bool                        is_upsert_disabled;
 } transactional_splinterdb_config;
 
@@ -82,6 +77,7 @@ typedef struct transactional_splinterdb {
    splinterdb                      *kvsb;
    transactional_splinterdb_config *tcfg;
    lock_table                      *lock_tbl;
+   iceberg_table                   *histcache;
 } transactional_splinterdb;
 
 typedef struct ONDISK timestamp_set {
@@ -90,12 +86,13 @@ typedef struct ONDISK timestamp_set {
 } timestamp_set __attribute__((aligned(64)));
 
 typedef struct rw_entry {
-   slice            key;
-   message          msg;
-   txn_timestamp    wts;
-   txn_timestamp    rts;
-   char             is_read;
-   lock_table_entry lock;
+   slice              key;
+   message            msg;
+   txn_timestamp      wts;
+   txn_timestamp      rts;
+   char               is_read;
+   lock_table_entry   lock;
+   tictoc_hist_entry *hist_entry; // points into histcache; NULL if not inserted
 } rw_entry;
 
 typedef struct ONDISK tuple_header {
@@ -250,12 +247,55 @@ get_global_timestamps(transactional_splinterdb *txn_kvsb,
    splinterdb_lookup_result_deinit(&result);
 }
 
+// Insert into histcache with refcount; allocate tictoc_hist_entry if new.
+static inline void
+rw_entry_histcache_insert(transactional_splinterdb *txn_kvsb, rw_entry *entry)
+{
+   if (entry->hist_entry) {
+      return; // already holds a reference
+   }
+
+   ValueType  initial_val = 0;
+   ValueType *val_ptr     = &initial_val;
+   slice key_for_iceberg  = entry->key;
+   bool is_new = iceberg_insert_and_get(
+      txn_kvsb->histcache, &key_for_iceberg, &val_ptr, platform_get_tid());
+   /* Do NOT use key_for_iceberg after this — iceberg may have rewritten it
+    * to point at its internal copy. entry->key must stay pointing at the
+    * user-allocated buffer so rw_entry_deinit can free it exactly once. */
+
+   if (is_new) {
+      tictoc_hist_entry *he = TYPED_ZALLOC(0, he);
+      platform_mutex_init(&he->lock, 0, 0);
+      hist_value_set_ptr(val_ptr, he);
+   } else {
+      // Spin until the inserting thread sets the pointer (~< 100 ns).
+      while (hist_value_get_ptr(val_ptr) == NULL) {
+         __asm__ volatile("pause" ::: "memory");
+      }
+   }
+
+   entry->hist_entry = hist_value_get_ptr(val_ptr);
+}
+
+// Decrement histcache refcount; iceberg evicts (calling hist_post_remove) at 0.
+static inline void
+rw_entry_histcache_remove(transactional_splinterdb *txn_kvsb, rw_entry *entry)
+{
+   if (!entry->hist_entry) {
+      return;
+   }
+   entry->hist_entry = NULL;
+   iceberg_remove(txn_kvsb->histcache, entry->key, platform_get_tid());
+}
+
 static rw_entry *
 rw_entry_create()
 {
    rw_entry *new_entry;
    new_entry = TYPED_ZALLOC(0, new_entry);
    platform_assert(new_entry != NULL);
+   new_entry->hist_entry = NULL;
    return new_entry;
 }
 
@@ -362,6 +402,10 @@ transactional_splinterdb_config_init(
    txn_splinterdb_cfg->kvsb_cfg.data_cfg =
       (data_config *)txn_splinterdb_cfg->txn_data_cfg;
 
+   iceberg_config_default_init(&txn_splinterdb_cfg->histcache_config);
+   txn_splinterdb_cfg->histcache_config.log_slots  = 28;
+   txn_splinterdb_cfg->histcache_config.post_remove = hist_post_remove;
+
    txn_splinterdb_cfg->isol_level = TRANSACTION_ISOLATION_LEVEL_SERIALIZABLE;
    txn_splinterdb_cfg->is_upsert_disabled = FALSE;
 }
@@ -393,7 +437,15 @@ transactional_splinterdb_create_or_open(const splinterdb_config   *kvsb_cfg,
    }
 
    _txn_kvsb->lock_tbl = lock_table_create(kvsb_cfg->data_cfg);
-   *txn_kvsb           = _txn_kvsb;
+
+   iceberg_table *histcache = TYPED_ZALLOC(0, histcache);
+   platform_assert(iceberg_init(histcache,
+                                &txn_splinterdb_cfg->histcache_config,
+                                kvsb_cfg->data_cfg)
+                   == 0);
+   _txn_kvsb->histcache = histcache;
+
+   *txn_kvsb = _txn_kvsb;
 
    return 0;
 }
@@ -420,6 +472,9 @@ transactional_splinterdb_close(transactional_splinterdb **txn_kvsb)
    splinterdb_close(&_txn_kvsb->kvsb);
 
    lock_table_destroy(_txn_kvsb->lock_tbl);
+
+   iceberg_print_state(_txn_kvsb->histcache);
+   platform_free(0, _txn_kvsb->histcache);
 
    platform_free(0, _txn_kvsb->tcfg->txn_data_cfg);
    platform_free(0, _txn_kvsb->tcfg);
@@ -453,6 +508,7 @@ static inline void
 transaction_deinit(transactional_splinterdb *txn_kvsb, transaction *txn)
 {
    for (int i = 0; i < txn->num_rw_entries; ++i) {
+      rw_entry_histcache_remove(txn_kvsb, txn->rw_entries[i]);
       rw_entry_deinit(txn->rw_entries[i]);
       platform_free(0, txn->rw_entries[i]);
    }
@@ -491,6 +547,9 @@ transactional_splinterdb_commit(transactional_splinterdb *txn_kvsb,
 RETRY_LOCK_WRITE_SET:
 {
    for (int lock_num = 0; lock_num < num_writes; ++lock_num) {
+      // Ensure write-only entries have a histcache reference for recording.
+      rw_entry_histcache_insert(txn_kvsb, write_set[lock_num]);
+
       lock_table_rc lock_rc = lock_table_try_acquire_entry_lock(
          txn_kvsb->lock_tbl, &write_set[lock_num]->lock);
       platform_assert(lock_rc != LOCK_TABLE_RC_DEADLK);
@@ -527,19 +586,33 @@ RETRY_LOCK_WRITE_SET:
          get_global_timestamps(txn_kvsb, r, &wts, &rts);
 
          if (wts != r->wts) {
-            // wts changed — determine hard vs soft
             if (lock_rc == LOCK_TABLE_RC_OK) {
                lock_table_release_entry_lock(txn_kvsb->lock_tbl, &r->lock);
             }
             if (wts <= commit_ts) {
-               // Hard: write is within our commit window — genuine conflict
+               // Hard: conflicting write is inside our commit window
                is_abort = TRUE;
                break;
             }
             // Soft: write is beyond our commit window — check history
-            if (ext_check_intermediate(
-                   r->key, (uint64_t)r->wts, (uint64_t)commit_ts))
-            {
+            tictoc_hist_entry *hist = r->hist_entry;
+            if (hist == NULL) {
+               // No history available — conservative abort
+               is_abort = TRUE;
+               break;
+            }
+            bool intermediate = false;
+            platform_mutex_lock(&hist->lock);
+            for (int h = 0; h < hist->count; h++) {
+               if (hist->wts_list[h] > r->wts
+                   && hist->wts_list[h] <= commit_ts)
+               {
+                  intermediate = true;
+                  break;
+               }
+            }
+            platform_mutex_unlock(&hist->lock);
+            if (intermediate) {
                is_abort = TRUE;
                break;
             }
@@ -571,11 +644,6 @@ RETRY_LOCK_WRITE_SET:
          rw_entry *w = write_set[i];
          platform_assert(rw_entry_is_write(w));
 
-         // Record old wts in history before overwriting
-         // w->wts is the wts we observed at read time (0 if write-only)
-         txn_timestamp old_wts = w->wts;
-         ext_record_write(w->key, (uint64_t)old_wts);
-
          timestamp_set ts = {
             .wts = commit_ts,
             .rts = commit_ts,
@@ -600,6 +668,18 @@ RETRY_LOCK_WRITE_SET:
          }
 
          platform_assert(rc == 0, "Error from SplinterDB: %d\n", rc);
+
+         // Record NEW wts (commit_ts) so other transactions can detect
+         // intermediate writes during soft-abort validation.
+         tictoc_hist_entry *he = w->hist_entry;
+         if (he) {
+            platform_mutex_lock(&he->lock);
+            if (he->count < EXT_HIST_MAX_WRITES) {
+               he->wts_list[he->count++] = commit_ts;
+            }
+            platform_mutex_unlock(&he->lock);
+         }
+
          lock_table_release_entry_lock(txn_kvsb->lock_tbl, &w->lock);
       }
    } else {
@@ -714,6 +794,8 @@ transactional_splinterdb_lookup(transactional_splinterdb *txn_kvsb,
    const data_config *cfg   = txn_kvsb->tcfg->kvsb_cfg.data_cfg;
    rw_entry          *entry = rw_entry_get(txn_kvsb, txn, user_key, cfg, TRUE);
 
+   rw_entry_histcache_insert(txn_kvsb, entry);
+
    _splinterdb_lookup_result *_result = (_splinterdb_lookup_result *)result;
 
    if (rw_entry_is_write(entry)) {
@@ -751,8 +833,6 @@ transactional_splinterdb_lookup(transactional_splinterdb *txn_kvsb,
       merge_accumulator_resize(&_result->value, value_len);
    } else {
       entry->wts = entry->rts = 0;
-      // --txn->num_rw_entries;
-      // rw_entry_deinit(entry);
    }
 
    return rc;
